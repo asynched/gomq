@@ -1,5 +1,7 @@
 package stream
 
+import "gomq/ack"
+
 type Producer struct {
 	Consumers []Consumer
 }
@@ -14,7 +16,7 @@ func (p *Producer) Subscribe(consumer Consumer) {
 	p.Consumers = append(p.Consumers, consumer)
 }
 
-func (p *Producer) Push(data []byte) {
+func (p *Producer) Push(data ack.Payload) {
 	for _, consumer := range p.Consumers {
 		consumer.Channel <- data
 	}

@@ -15,3 +15,7 @@ func FromJson[T any](data []byte) (T, error) {
 
 	return serialized, nil
 }
+
+func ToJson[T any](data T) ([]byte, error) {
+	return json.Marshal(data)
+}

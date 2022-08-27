@@ -1,16 +1,18 @@
 package stream
 
+import "gomq/ack"
+
 type Consumer struct {
-	Channel chan []byte
+	Channel chan ack.Payload
 }
 
 func NewConsumer() Consumer {
 	return Consumer{
-		Channel: make(chan []byte),
+		Channel: make(chan ack.Payload),
 	}
 }
 
-func (c *Consumer) Handle(handler func([]byte)) {
+func (c *Consumer) Handle(handler func(ack.Payload)) {
 	for data := range c.Channel {
 		handler(data)
 	}
