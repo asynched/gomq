@@ -1,16 +1,23 @@
 package main
 
 import (
-	"fmt"
-	"gomq/ack"
 	"gomq/concurrency"
+	"gomq/messages"
 	"gomq/serializers"
 	"gomq/stream"
+	"log"
 	"net"
-	"time"
+	"strings"
 )
 
-const SOCK_BUFF_SIZE = 512
+/*
+TODO:
+	1. Fix synchronization issues with consumers;
+	2. Review mutex usage;
+	3. Fix CPU usage, something is very wrong there, lol.
+*/
+
+const SOCK_BUFFER_SIZE = 512
 
 type GlobalRegistry struct {
 	Producers map[string]stream.Producer
@@ -19,106 +26,188 @@ type GlobalRegistry struct {
 var globalRegistry concurrency.Mutex[GlobalRegistry]
 
 func main() {
-	producer := stream.NewProducer()
-	consumer := stream.NewConsumer()
+	SetupGlobalRegistry()
+	SetupLogger()
+	log.Fatal(SetupNetworkLayer())
+}
 
-	go consumer.Handle(func(message ack.Payload) {
-		fmt.Println("Data:", message)
-	})
+func getKeys[K string, T any](m map[K]T) []K {
+	keys := make([]K, 0, len(m))
 
-	producer.Subscribe(consumer)
-
-	for counter := 0; counter < 512; counter++ {
-		producer.Push(ack.Payload{
-			Error:   false,
-			Payload: "Hello, world!",
-		})
-		time.Sleep(time.Millisecond * 250)
+	for k := range m {
+		keys = append(keys, k)
 	}
+
+	return keys
+}
+
+func SetupGlobalRegistry() {
+	globalRegistry = concurrency.NewMutex(&GlobalRegistry{
+		Producers: make(map[string]stream.Producer),
+	})
+}
+
+func SetupLogger() {
+	log.SetFlags(log.LUTC)
+	log.SetPrefix("[GOMQ] ")
 }
 
 func SetupNetworkLayer() error {
 	listener, err := net.ListenTCP("tcp", &net.TCPAddr{
 		Port: 3333,
-		IP:   []byte("127.0.0.1"),
+		IP:   net.IPv4(127, 0, 0, 1),
 	})
+
+	log.Println("GOMQ server has started.")
 
 	if err != nil {
 		return err
 	}
 
 	for {
-		connection, err := listener.AcceptTCP()
+		conn, err := listener.AcceptTCP()
 
 		if err != nil {
 			continue
 		}
 
-		go HandleConnection(connection)
+		log.Printf("New connection established, IP: %s.\n", conn.LocalAddr().String())
+
+		go HandleConnection(conn)
 	}
 }
 
-func HandleConnection(connection *net.TCPConn) {
-	data := make([]byte, SOCK_BUFF_SIZE)
-	_, err := connection.Read(data)
+func HandleConnection(conn *net.TCPConn) {
+	defer conn.Close()
+	defer log.Printf("Connection with IP: %s has been closed.\n", conn.LocalAddr().String())
+
+	registry := globalRegistry.Lock()
+
+	log.Println("Registered producers:", getKeys(registry.Producers))
+
+	globalRegistry.Unlock()
+
+	data := make([]byte, SOCK_BUFFER_SIZE)
+	_, err := conn.Read(data)
+
+	log.Printf("Clients registration payload: %s.\n", string(data))
 
 	if err != nil {
 		return
 	}
 
-	message, err := serializers.FromJson[ack.Registration](data)
+	message, err := serializers.FromJson[messages.Registration]([]byte(strings.Trim(string(data), "\x00")))
 
 	if err != nil {
+		log.Println("Couldn't parse registration message, disconnecting client.")
+		log.Printf("Error: '%s'\n", err)
 		return
 	}
 
 	switch message.Type {
 	case "CONSUMER":
-		HandleConsumer(connection, message)
+		log.Printf("Consumer with topic '%s' registered.", message.Topic)
+		HandleConsumer(conn, message)
+		log.Printf("Consumer with topic '%s' disconnected.", message.Topic)
+		break
 	case "PRODUCER":
-		HandleProducer(connection, message)
+		log.Printf("Producer with topic '%s' registered.", message.Topic)
+		HandleProducer(conn, message)
+		log.Printf("Producer with topic '%s' disconnected.", message.Topic)
+		break
+	default:
+		break
 	}
 }
 
-func HandleConsumer(conn *net.TCPConn, message ack.Registration) {
+func HandleConsumer(conn *net.TCPConn, message messages.Registration) {
 	registry := globalRegistry.Lock()
 
 	producer, ok := registry.Producers[message.Topic]
-	globalRegistry.Unlock()
 
 	if !ok {
-		data, err := serializers.ToJson(ack.Payload{
+		log.Printf("Producer with the topic '%s' didn't exist, closing connection.", message.Topic)
+		data, err := serializers.ToJson(messages.Payload{
 			Error:   true,
-			Payload: ack.ERR_ALREADY_REGISTERED,
+			Payload: messages.ERR_PRODUCER_UNAVAILABLE,
 		})
+
+		if err == nil {
+			conn.Write(data)
+		}
+
+		globalRegistry.Unlock()
+		return
+	}
+
+	consumer := stream.NewConsumer()
+
+	go consumer.Handle(func(message messages.Payload) {
+		data, err := serializers.ToJson(message)
 
 		if err != nil {
 			return
 		}
 
 		conn.Write(data)
-		conn.Close()
-		return
-	}
+	})
+
+	producer.Subscribe(consumer)
+	globalRegistry.Unlock()
 
 	for {
-		data := make([]byte, SOCK_BUFF_SIZE)
-		_, err := conn.Read(data)
+		_, err := conn.Read(nil)
 
 		if err != nil {
+			producer.Unsubscribe(consumer)
 			break
 		}
-
-		payload, err := serializers.FromJson[ack.Payload](data)
-
-		if err != nil {
-			break
-		}
-
-		producer.Push(payload)
 	}
 }
 
-func HandleProducer(conn *net.TCPConn, message ack.Registration) {
+func HandleProducer(conn *net.TCPConn, message messages.Registration) {
+	registry := globalRegistry.Lock()
 
+	_, ok := registry.Producers[message.Topic]
+
+	if ok {
+		log.Printf("Producer already registered, topic: %s\n", message.Topic)
+		data, err := serializers.ToJson(messages.Payload{
+			Error:   true,
+			Payload: messages.ERR_PRODUCER_ALREADY_REGISTERED,
+		})
+
+		if err == nil {
+			conn.Write(data)
+		}
+
+		globalRegistry.Unlock()
+		return
+	}
+
+	producer := stream.NewProducer()
+	registry.Producers[message.Topic] = producer
+	globalRegistry.Unlock()
+
+	for {
+		data := make([]byte, SOCK_BUFFER_SIZE)
+		_, err := conn.Read(data)
+
+		if err != nil {
+			producer.Disconnect()
+
+			registry := globalRegistry.Lock()
+			delete(registry.Producers, message.Topic)
+			globalRegistry.Unlock()
+
+			return
+		}
+
+		log.Printf("Received '%s' from client\n", string(data))
+		log.Printf("Streaming message to %d consumers.\n", len(producer.Consumers))
+		producer.Push(messages.Payload{
+			Error:   false,
+			Payload: string(data),
+		})
+	}
 }

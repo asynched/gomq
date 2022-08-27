@@ -9,6 +9,13 @@ type Mutex[T any] struct {
 	state *T
 }
 
+func NewMutex[T any](state *T) Mutex[T] {
+	return Mutex[T]{
+		mutex: sync.Mutex{},
+		state: state,
+	}
+}
+
 func (m *Mutex[T]) Lock() *T {
 	m.mutex.Lock()
 	return m.state
