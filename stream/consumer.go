@@ -15,7 +15,9 @@ func NewConsumer() Consumer {
 }
 
 func (c *Consumer) Handle(handler func(messages.Payload)) {
-	for data := range c.Channel {
-		handler(data)
-	}
+	go func() {
+		for data := range c.Channel {
+			handler(data)
+		}
+	}()
 }

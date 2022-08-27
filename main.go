@@ -14,9 +14,7 @@ import (
 
 /*
 TODO:
-	1. Fix synchronization issues with consumers;
-	2. Review mutex usage;
-	3. Fix CPU usage, something is very wrong there, lol.
+	1. Review CPU usage, something is very wrong there, lol.
 */
 
 const SOCK_BUFFER_SIZE = 512
@@ -157,7 +155,7 @@ func HandleConsumer(conn *net.TCPConn, message messages.Registration) {
 
 	consumer := stream.NewConsumer()
 
-	go consumer.Handle(func(message messages.Payload) {
+	consumer.Handle(func(message messages.Payload) {
 		data, err := serializers.ToJson(message)
 
 		if err != nil {
@@ -171,7 +169,7 @@ func HandleConsumer(conn *net.TCPConn, message messages.Registration) {
 	globalRegistry.Unlock()
 
 	for {
-		_, err := conn.Read(nil)
+		_, err := conn.Read(make([]byte, SOCK_BUFFER_SIZE))
 
 		if err != nil {
 			producer.Unsubscribe(consumer)
